@@ -1,0 +1,353 @@
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: dev
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.yaml'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+        - '**/*.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the project
+    runs-on: ubuntu-latest
+
+    steps:
+   
+    - name: Login Jira
+      id: Login_Jira
+      uses: atlassian/gajira-login@master
+      env:
+        JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+        JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+        JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+    - uses: actions/checkout@v3
+      id: checkout_code
+    - name: Set up Python 3.9
+      id: setup_python
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.9"
+    - name: Install dependencies
+      id: install_dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    - name: Lint with flake8
+      id: Lint_with_flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Test with pytest
+      id: run_testcases
+      run: |
+        pytest test_app.py 
+    
+
+    - name: Create ticket in jira
+      id: create_jira_ticket
+      uses: atlassian/gajira-create@master
+      if: failure()
+      with:
+        project: DEV
+        issuetype: Bug
+        summary: |
+          Build Failed for Repository: ${{ github.repository }} Env: Build
+        description: |
+          Build failed for ${{ github.repository }}. Please find the details below:
+          ${{ toJson(steps) }}
+    
+  DeployDev:
+    name: Deploy to Dev
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        id: checkout_code
+      - name: Login Jira
+        id: Login_Jira
+        uses: atlassian/gajira-login@master
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      - name: SonarQube Scan
+        id: SonarQube_code_scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: SonarQube Quality Gate check
+        id: sonarqube_quality_gate_check
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        # Force to fail step after specific time
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Run Checkov action
+        id: checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: deployments/
+          quiet: true # optional: display only failed checks
+          soft_fail: true # optional: do not return an error code if there are failed checks
+          framework: all # optional: run only on a specific infrastructure {cloudformation,terraform,kubernetes,all}
+          output_format: sarif # optional: the output format, one of: cli, json, junitxml, github_failed_only, or sarif. Default: sarif
+          download_external_modules: true # optional: download external terraform modules from public git repositories and terraform registry
+          log_level: DEBUG # optional: set log level. Default WARNING
+          container_user: 1000 # optional
+      - name: Run Bridgecrew
+        id: Bridgecrew
+        uses: bridgecrewio/bridgecrew-action@master 
+        with:
+          directory: deployments/
+          api-key: ${{ secrets.BRIDGECREW }}
+          quiet: true
+          soft_fail: true
+          output_format: sarif
+          container_user: 1000 # optional
+      - uses: mr-smithers-excellent/docker-build-push@v5
+        name: Build & push Docker image
+        id: docker_build_and_push
+        with:
+          image: images/python-app
+          tags: ${{github.run_number}}
+          registry: gitopstesting.jfrog.io
+          dockerfile: Dockerfile
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        id: trivy_scan
+        with:
+          image-ref: 'gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+      - name: Run Snyk to check Docker image for vulnerabilities
+        id: run_snyk
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}
+          args: --json-file-output=snyk.json
+      - name: json to html report
+        id: snyk_results_json_to_html
+        run: |
+          npm install snyk-to-html -g
+          snyk-to-html -i snyk.json -o results.html
+      - uses: actions/upload-artifact@v3
+        id: upload_artifact
+        with:
+          name: snyk_results
+          path: results.html
+
+      - name: Update deployments/dev/deploy.yaml
+        id: update_build_number_in_dev
+        uses: fjogeleit/yaml-update-action@main
+        with:
+          valueFile: 'deployments/dev/deployment.yaml'
+          propertyPath: 'spec.template.spec.containers[0].image'
+          value: gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}
+          commitChange: true
+          updateFile: true
+          targetBranch: dev
+          branch: dev
+          token: ${{ secrets.TOKEN }}
+      - name: Create ticket in jira
+        id: create_jira_ticket
+        uses: atlassian/gajira-create@master
+        if: failure()
+        with:
+          project: DEV
+          issuetype: Bug
+          summary: |
+            Build Failed for Repository: ${{ github.repository }} and ENV: Dev
+          description: |
+            Build failed for ${{ github.repository }}. Please find the details below:
+            ${{ toJson(steps) }}
+      
+      - name: change mode
+        id: change_permission_sendgrid 
+        if: always()
+        run: chmod +x sendgrid.js
+      
+      - name: SendGrid
+        id: send_mail 
+        if: always()
+        uses: peter-evans/sendgrid-action@v1
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          STEPS_STATUS: ${{ toJson(steps) }}
+          REPOSITORY: ${{ github.repository }}
+          SCRIPT_FILEPATH: ./sendgrid.js
+      - name: ArgoCD Sync Action
+        # You may pin to the exact commit or the version.
+        # uses: safe2008/argocd-app-actions@9f5573186b52fdd0a1d03c7f9d6e9bd7e49be1f1
+        uses: safe2008/argocd-app-actions@v0.2.0
+        id: argocd_sync_dev_env
+        with:
+          # ArgoCD server address
+          address: "argocd.test.unisys-az.com"
+          # ArgoCD token
+          token:  ${{ secrets.ARGOCD_TOKEN }}
+          # insecure
+          insecure: true
+          # Application name to sync
+          appName: "python-dev"
+
+  DeployQA:
+    name: Deploy to QA
+    needs: [DeployDev]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        id: checkout_code
+      - name: Start Netsparker Enterprise Scan
+        id: netsparker-enterprise-scan-step
+        uses: netsparker/Netsparker-Cloud-GitHub-Actions@v0.0.1
+        with:
+          website-id: '66a86a5702244eeedd1cae5502598c83' # FILL HERE
+          scan-type: 'FullWithSelectedProfile'
+          profile-id: 'f8cbf8c2-300b-43b2-38c0-ae9a01a61951' # FILL HERE
+          user-id: aadd748694864ab4ff37ae5502462834
+          api-token: 7lS8Ql/+aH+V0+HhJfwQ61jHUYvYOxkoXrqW0SgFstQ=
+          base-url: 'https://www.netsparkercloud.com'
+      # Displays output for action
+      - name: Display Scan Request Message
+        id: display_netsparkar_scan_details
+        run: echo "${{ steps.netsparker-enterprise-scan-step.outputs.scan-message }}"
+      - name: Login Jira
+        id: Login_Jira
+        uses: atlassian/gajira-login@master
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+
+    
+
+      - name: Update deployments/qa/deploy.yaml
+        uses: fjogeleit/yaml-update-action@main
+        id: update_build_number_in_qa
+        with:
+          valueFile: 'deployments/qa/deployment.yaml'
+          propertyPath: 'spec.template.spec.containers[0].image'
+          value: gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}
+          commitChange: true
+          updateFile: true
+          targetBranch: dev
+          branch: dev
+          token: ${{ secrets.TOKEN }}
+      - name: Create ticket in jira
+        id: create_jira_ticket
+        uses: atlassian/gajira-create@master
+        if: failure()
+        with:
+          project: DEV
+          issuetype: Bug
+          summary: |
+            Build Failed for Repository: ${{ github.repository }} Env: QA 
+          description: |
+            Build failed for ${{ github.repository }}. Please find the details below:
+            ${{ toJson(steps) }}
+      
+      - name: change mode
+        if: always()
+        id: change_permission_sendgrid 
+        run: chmod +x sendgrid.js
+      
+      - name: SendGrid
+        if: always()
+        id: send_mail
+        uses: peter-evans/sendgrid-action@v1
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          STEPS_STATUS: ${{ toJson(steps) }}
+          REPOSITORY: ${{ github.repository }}
+          SCRIPT_FILEPATH: ./sendgrid.js
+
+      - name: ArgoCD Sync Action
+        id: argocd_sync_qa_env
+        # You may pin to the exact commit or the version.
+        # uses: safe2008/argocd-app-actions@9f5573186b52fdd0a1d03c7f9d6e9bd7e49be1f1
+        uses: safe2008/argocd-app-actions@v0.2.0
+        with:
+          # ArgoCD server address
+          address: "argocd.test.unisys-az.com"
+          # ArgoCD token
+          token:  ${{ secrets.ARGOCD_TOKEN }}
+          # insecure
+          insecure: true
+          # Application name to sync
+          appName: "python-qa"
+           
+  DeployProd:
+    name: Deploy to Prod
+    needs: [DeployQA]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        id: checkout_code
+      - name: Login Jira
+        id: Login_Jira
+        uses: atlassian/gajira-login@master
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      
+  
+
+      - name: Update deployments/prod/deploy.yaml
+        uses: fjogeleit/yaml-update-action@main
+        id: update_build_number_in_prod
+        with:
+          valueFile: 'deployments/prod/deployment.yaml'
+          propertyPath: 'spec.template.spec.containers[0].image'
+          value: gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}
+          commitChange: true
+          updateFile: true
+          targetBranch: dev
+          branch: dev
+          token: ${{ secrets.TOKEN }}
+      - name: Create ticket in jira
+        uses: atlassian/gajira-create@master
+        if: failure()
+        with:
+          project: DEV
+          issuetype: Bug
+          summary: |
+            Build Failed for Repository: ${{ github.repository }} Env: Prod
+          description: |
+            Build failed for ${{ github.repository }}. Please find the details below:
+            ${{ toJson(steps) }}
+      
+      - name: change mode
+        if: always()
+        run: chmod +x sendgrid.js
+      
+      - name: SendGrid
+        if: always()
+        uses: peter-evans/sendgrid-action@v1
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          STEPS_STATUS: ${{ toJson(steps) }}
+          REPOSITORY: ${{ github.repository }}
+          SCRIPT_FILEPATH: ./sendgrid.js

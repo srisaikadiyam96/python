@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pythondemo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pythondemo
+  template:
+    metadata:
+      labels:
+        app: pythondemo
+        tier: frontend
+    spec:
+      containers:
+        - name: pythondemo
+          image: argocdtest11.jfrog.io/images/argo-trigger-app:227
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+      imagePullSecrets:
+        - name: udutha-secret
+      nodeSelector:
+        kubernetes.io/os: linux

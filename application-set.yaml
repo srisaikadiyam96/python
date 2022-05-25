@@ -1,0 +1,49 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: guestbook
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements:
+      - cluster: dev-cluster
+        url: https://kubernetes.default.svc
+        namespace: multi-dev
+        directory: dev
+        branch: dev
+
+      - cluster: qa-cluster
+        url: https://kubernetes.default.svc
+        namespace: multi-qa
+        directory: qa
+        branch: dev
+
+
+      - cluster: prod-cluster
+        url: https://kubernetes.default.svc
+        namespace: multi-prod
+        directory: prod
+        branch: dev
+
+
+  template:
+    metadata:
+      name: '{{cluster}}'
+    spec:
+      project: default
+      source:
+        repoURL: git@github.com:POC-for-projects/sample-python.git
+        targetRevision: '{{branch}}'
+        path: '{{directory}}'
+      destination:
+        server: '{{url}}'
+        namespace: '{{namespace}}'
+      syncPolicy:
+        syncOptions:
+        - CreateNamespace=true
+
+        automated:
+          selfHeal: true
+          prune: true
+          allowEmpty: true

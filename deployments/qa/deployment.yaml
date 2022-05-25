@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pythondemo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pythondemo
+      env: qa
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: pythondemo
+        env: qa
+        tier: frontend
+    spec:
+      containers:
+        - name: pythondemo
+          image: gitopstesting.jfrog.io/gitops-docker/python-app:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+      imagePullSecrets:
+        - name: argocd-cred
+      nodeSelector:
+        kubernetes.io/os: linux
