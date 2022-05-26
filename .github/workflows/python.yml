@@ -252,8 +252,8 @@ jobs:
           value: gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}
           commitChange: true
           updateFile: true
-          targetBranch: dev
-          branch: dev
+          targetBranch: main
+          branch: main
           token: ${{ secrets.TOKEN }}
       - name: Create ticket in jira
         id: create_jira_ticket
@@ -324,8 +324,8 @@ jobs:
           value: gitopstesting.jfrog.io/gitops-docker/python-app:${{github.run_number}}
           commitChange: true
           updateFile: true
-          targetBranch: dev
-          branch: dev
+          targetBranch: main
+          branch: main
           token: ${{ secrets.TOKEN }}
       - name: Create ticket in jira
         uses: atlassian/gajira-create@master
