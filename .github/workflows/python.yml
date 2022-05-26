@@ -122,7 +122,7 @@ jobs:
         name: Build & push Docker image
         id: docker_build_and_push
         with:
-          image: images/python-app
+          image: gitops-docker/python-app
           tags: ${{github.run_number}}
           registry: gitopstesting.jfrog.io
           dockerfile: Dockerfile
